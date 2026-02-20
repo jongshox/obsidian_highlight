@@ -410,6 +410,12 @@ class ReadingHighlighterPlugin extends Plugin {
       const roughEnd = Math.max(a1, b1);
       const refined = this.refineRangeWithinBounds(raw, snippet, roughStart, roughEnd);
       if (refined) return refined;
+
+      // 엄격 매칭 실패 시, sourcepos 기반 범위를 완화 조건으로 허용
+      const roughText = raw.slice(roughStart, roughEnd);
+      if (this.selectionCouldMapToRange(roughText, snippet)) {
+        return [roughStart, roughEnd];
+      }
     }
 
     const fallback = this.findMatchWithLinks(raw, snippet);
@@ -437,7 +443,22 @@ class ReadingHighlighterPlugin extends Plugin {
     if (!normalizedSnippet) return false;
 
     const renderedText = this.createPositionMap(sourceRangeText).renderedText;
-    return this.normalizeSpaces(renderedText) === normalizedSnippet;
+    const normalizedRendered = this.normalizeSpaces(renderedText);
+    return normalizedRendered === normalizedSnippet;
+  }
+
+  selectionCouldMapToRange(sourceRangeText, snippet) {
+    const normalizedSnippet = this.normalizeSpaces(snippet);
+    if (!normalizedSnippet) return false;
+
+    const renderedText = this.createPositionMap(sourceRangeText).renderedText;
+    const normalizedRendered = this.normalizeSpaces(renderedText);
+    if (!normalizedRendered) return false;
+
+    if (normalizedRendered === normalizedSnippet) return true;
+    if (normalizedRendered.includes(normalizedSnippet)) return true;
+    if (normalizedSnippet.includes(normalizedRendered)) return true;
+    return false;
   }
 
   normalizeSpaces(text) {
