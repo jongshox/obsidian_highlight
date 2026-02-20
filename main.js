@@ -4,6 +4,8 @@ const { Plugin, MarkdownView, Notice, Platform, setIcon } = require("obsidian");
 class ReadingHighlighterPlugin extends Plugin {
   floatingButtonEl = null;
   boundHandleSelectionChange = null;
+  floatingButtonMode = "highlight";
+  pendingRemoveMarkEl = null;
 
   onload() {
     /*── 명령어 팔레트에 명령 추가 ──*/
@@ -34,10 +36,12 @@ class ReadingHighlighterPlugin extends Plugin {
     this.createFloatingButton();
     this.boundHandleSelectionChange = this.handleSelectionChange.bind(this);
     this.registerDomEvent(document, "selectionchange", this.boundHandleSelectionChange);
+    this.registerDomEvent(document, "click", this.handleDocumentClick.bind(this));
 
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         // 활성 탭이 변경될 때 버튼 상태 업데이트
+        this.pendingRemoveMarkEl = null;
         this.handleSelectionChange();
       })
     );
@@ -60,16 +64,21 @@ class ReadingHighlighterPlugin extends Plugin {
     setIcon(this.floatingButtonEl, "highlighter");
     this.floatingButtonEl.setAttribute("aria-label", "선택 영역 하이라이트");
     this.floatingButtonEl.addClass("reading-highlighter-float-btn");
+    this.setFloatingButtonMode("highlight");
 
     // 버튼 클릭 시 텍스트 선택이 해제되지 않도록 mousedown 기본 동작 차단
     this.registerDomEvent(this.floatingButtonEl, "mousedown", (evt) => {
       evt.preventDefault();
     });
 
-    this.registerDomEvent(this.floatingButtonEl, "click", () => {
+    this.registerDomEvent(this.floatingButtonEl, "click", async () => {
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
       if (view && view.getMode() === "preview") {
-        this.highlightSelection(view);
+        if (this.floatingButtonMode === "remove") {
+          await this.removeClickedHighlight(view);
+        } else {
+          await this.highlightSelection(view);
+        }
       }
       this.hideFloatingButton(); // 클릭 후 버튼 숨김
     });
@@ -80,17 +89,101 @@ class ReadingHighlighterPlugin extends Plugin {
   handleSelectionChange() {
     const view = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!view || view.getMode() !== "preview") {
+      this.pendingRemoveMarkEl = null;
       this.hideFloatingButton();
       return;
     }
 
     const sel = document.getSelection();
-    const snippet = sel?.toString() ?? "";
-
-    if (snippet.trim() && sel && !sel.isCollapsed) {
+    if (this.isSelectionInActiveView(sel, view)) {
+      this.pendingRemoveMarkEl = null;
+      this.setFloatingButtonMode("highlight");
       this.showFloatingButton();
-    } else {
+      return;
+    }
+
+    if (this.hasValidRemoveTarget(view)) {
+      this.setFloatingButtonMode("remove");
+      this.showFloatingButton();
+      return;
+    }
+
+    this.hideFloatingButton();
+  }
+
+  handleDocumentClick(evt) {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || view.getMode() !== "preview") {
+      this.pendingRemoveMarkEl = null;
       this.hideFloatingButton();
+      return;
+    }
+
+    const target =
+      evt.target instanceof Element ? evt.target : evt.target?.parentElement ?? null;
+    if (!target) return;
+    if (this.floatingButtonEl?.contains(target)) return;
+
+    const markEl = target.closest("mark");
+    if (markEl && view.containerEl.contains(markEl)) {
+      const snippet = this.normalizeSpaces(markEl.textContent ?? "");
+      if (!snippet) return;
+      this.pendingRemoveMarkEl = markEl;
+      const sel = document.getSelection();
+      if (sel && !sel.isCollapsed) sel.removeAllRanges();
+      this.setFloatingButtonMode("remove");
+      this.showFloatingButton();
+      return;
+    }
+
+    this.pendingRemoveMarkEl = null;
+    this.handleSelectionChange();
+  }
+
+  isSelectionInActiveView(sel, view) {
+    if (!sel || sel.isCollapsed) return false;
+
+    const snippet = this.normalizeSpaces(sel.toString());
+    if (!snippet) return false;
+
+    const anchorNode = sel.anchorNode;
+    const focusNode = sel.focusNode;
+    if (!anchorNode || !focusNode) return false;
+
+    return view.containerEl.contains(anchorNode) && view.containerEl.contains(focusNode);
+  }
+
+  hasValidRemoveTarget(view) {
+    if (!this.pendingRemoveMarkEl) return false;
+    if (!this.pendingRemoveMarkEl.isConnected) {
+      this.pendingRemoveMarkEl = null;
+      return false;
+    }
+    if (!view.containerEl.contains(this.pendingRemoveMarkEl)) {
+      this.pendingRemoveMarkEl = null;
+      return false;
+    }
+    if (!this.normalizeSpaces(this.pendingRemoveMarkEl.textContent ?? "")) {
+      this.pendingRemoveMarkEl = null;
+      return false;
+    }
+    return true;
+  }
+
+  setFloatingButtonMode(mode) {
+    if (!this.floatingButtonEl) return;
+
+    this.floatingButtonMode = mode;
+    this.floatingButtonEl.classList.toggle("is-remove", mode === "remove");
+
+    if (mode === "remove") {
+      setIcon(this.floatingButtonEl, "trash-2");
+      this.floatingButtonEl.setAttribute("aria-label", "선택한 하이라이트 지우기");
+      this.floatingButtonEl.setAttribute("title", "하이라이트 지우기");
+    } else {
+      setIcon(this.floatingButtonEl, "highlighter");
+      this.floatingButtonEl.setAttribute("aria-label", "선택 영역 하이라이트");
+      this.floatingButtonEl.setAttribute("title", "선택 영역 하이라이트");
     }
   }
 
@@ -178,6 +271,132 @@ class ReadingHighlighterPlugin extends Plugin {
     });
 
     sel?.removeAllRanges();
+  }
+
+  async removeClickedHighlight(view) {
+    if (!this.hasValidRemoveTarget(view)) {
+      new Notice("지울 하이라이트를 다시 클릭해주세요.");
+      return;
+    }
+
+    const markEl = this.pendingRemoveMarkEl;
+    const snippet = this.normalizeSpaces(markEl?.textContent ?? "");
+    if (!snippet) {
+      new Notice("지울 하이라이트 텍스트를 찾을 수 없습니다.");
+      return;
+    }
+
+    const scrollBefore = this.getScroll(view);
+    const file = view.file;
+    const raw = await this.app.vault.read(file);
+
+    const wrapperRange = this.resolveHighlightWrapperRange(raw, markEl, snippet);
+    if (!wrapperRange) {
+      new Notice("원본에서 하이라이트 위치를 찾을 수 없습니다.");
+      return;
+    }
+
+    const [wrapperStart, wrapperEnd] = wrapperRange;
+    if (
+      wrapperEnd - wrapperStart < 4 ||
+      raw.slice(wrapperStart, wrapperStart + 2) !== "==" ||
+      raw.slice(wrapperEnd - 2, wrapperEnd) !== "=="
+    ) {
+      new Notice("하이라이트 형식이 예상과 달라 삭제할 수 없습니다.");
+      return;
+    }
+
+    const unwrapped = raw.slice(wrapperStart + 2, wrapperEnd - 2);
+    const updated = raw.slice(0, wrapperStart) + unwrapped + raw.slice(wrapperEnd);
+    await this.app.vault.modify(file, updated);
+
+    const restore = () => this.applyScroll(view, scrollBefore);
+    requestAnimationFrame(() => {
+      restore();
+      setTimeout(restore, 50);
+    });
+
+    this.pendingRemoveMarkEl = null;
+    document.getSelection()?.removeAllRanges();
+  }
+
+  resolveHighlightWrapperRange(source, markEl, snippet) {
+    const scopedRange = this.sourceRangeViaSourcePos(markEl, source);
+    if (scopedRange) {
+      const scopedMatch = this.findUniqueHighlightWrapper(
+        source,
+        snippet,
+        scopedRange[0],
+        scopedRange[1]
+      );
+      if (scopedMatch) return scopedMatch;
+    }
+
+    return this.findUniqueHighlightWrapper(source, snippet, 0, source.length);
+  }
+
+  findUniqueHighlightWrapper(source, snippet, from, to) {
+    const normalizedSnippet = this.normalizeSpaces(snippet);
+    if (!normalizedSnippet || from < 0 || to > source.length || from >= to) return null;
+
+    const segment = source.slice(from, to);
+    const regex = /==([\s\S]*?)==/g;
+    const candidates = [];
+
+    let match;
+    while ((match = regex.exec(segment)) !== null) {
+      const rendered = this.createPositionMap(match[1]).renderedText;
+      if (this.normalizeSpaces(rendered) !== normalizedSnippet) continue;
+
+      const start = from + match.index;
+      candidates.push([start, start + match[0].length]);
+    }
+
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  sourceRangeViaSourcePos(node, source) {
+    if (!node) return null;
+
+    let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    let depth = 0;
+    while (el && !el.getAttribute("data-sourcepos") && depth < 8) {
+      el = el.parentElement;
+      depth++;
+    }
+
+    const attr = el?.getAttribute("data-sourcepos");
+    if (!attr) return null;
+
+    const parsed = attr.match(/^(\d+):(\d+)-(\d+):(\d+)$/);
+    if (!parsed) return null;
+
+    const startLine = Number(parsed[1]);
+    const startCol = Number(parsed[2]);
+    const endLine = Number(parsed[3]);
+    const endCol = Number(parsed[4]);
+
+    const start = this.offsetFromLineCol(source, startLine, startCol);
+    const endInclusive = this.offsetFromLineCol(source, endLine, endCol);
+    if (start == null || endInclusive == null || endInclusive < start) return null;
+
+    return [start, Math.min(source.length, endInclusive + 1)];
+  }
+
+  offsetFromLineCol(source, line, col) {
+    if (!Number.isInteger(line) || !Number.isInteger(col) || line < 1 || col < 1) return null;
+
+    const lines = source.split("\n");
+    if (line > lines.length) return null;
+
+    let offset = 0;
+    for (let i = 0; i < line - 1; i++) {
+      offset += lines[i].length + 1;
+    }
+
+    const lineText = lines[line - 1] ?? "";
+    const clampedCol = Math.min(col - 1, lineText.length);
+    return offset + clampedCol;
   }
 
   /*────────── 선택 범위 결정/검증 ──────────*/
@@ -496,16 +715,17 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
   /*────────── 위치 맵 생성 (마크다운 → 렌더링 텍스트) ──────────*/
-  createPositionMap(source) {
+  createPositionMap(source, baseOffset = 0) {
     const map = [];
     let renderedText = '';
     let sourcePos = 0;
 
     while (sourcePos < source.length) {
       const char = source[sourcePos];
+      const prevChar = sourcePos > 0 ? source[sourcePos - 1] : "";
 
       // 마크다운 링크 감지: [텍스트](url)
-      if (char === '[') {
+      if (char === '[' && prevChar !== "\\") {
         const mdLinkMatch = source.slice(sourcePos).match(/^\[([^\]]+)\]\([^)]*\)/);
         if (mdLinkMatch) {
           const fullMatch = mdLinkMatch[0];
@@ -514,8 +734,8 @@ class ReadingHighlighterPlugin extends Plugin {
           // 링크 텍스트의 각 문자 위치 맵핑
           for (let i = 0; i < linkText.length; i++) {
             map.push({
-              sourceStart: sourcePos,
-              sourceEnd: sourcePos + fullMatch.length,
+              sourceStart: baseOffset + sourcePos,
+              sourceEnd: baseOffset + sourcePos + fullMatch.length,
               renderedPos: renderedText.length + i,
               isInLink: true,
               linkType: 'markdown'
@@ -536,8 +756,8 @@ class ReadingHighlighterPlugin extends Plugin {
           // 표시 텍스트의 각 문자 위치 맵핑
           for (let i = 0; i < displayText.length; i++) {
             map.push({
-              sourceStart: sourcePos,
-              sourceEnd: sourcePos + fullMatch.length,
+              sourceStart: baseOffset + sourcePos,
+              sourceEnd: baseOffset + sourcePos + fullMatch.length,
               renderedPos: renderedText.length + i,
               isInLink: true,
               linkType: 'wiki'
@@ -550,22 +770,40 @@ class ReadingHighlighterPlugin extends Plugin {
         }
       }
 
-      // 기타 마크다운 인라인 서식 감지: *, =, `
-      if (char === '*' || char === '=' || char === '`') {
+      // 기타 마크다운 인라인 서식 감지: *, _, ~, =, `
+      if (
+        prevChar !== "\\" &&
+        (char === '*' || char === '_' || char === '~' || char === '=' || char === '`')
+      ) {
         const formatting = this.detectFormatting(source, sourcePos);
         if (formatting) {
-          // 서식 기호를 제외한 내용만 위치 맵핑
-          for (let i = 0; i < formatting.content.length; i++) {
-            map.push({
-              sourceStart: sourcePos + formatting.startOffset,
-              sourceEnd: sourcePos + formatting.startOffset + formatting.content.length,
-              renderedPos: renderedText.length + i,
-              isInLink: false,
-              linkType: null
-            });
+          if (formatting.isCode) {
+            for (let i = 0; i < formatting.content.length; i++) {
+              const start = baseOffset + sourcePos + formatting.startOffset + i;
+              map.push({
+                sourceStart: start,
+                sourceEnd: start + 1,
+                renderedPos: renderedText.length + i,
+                isInLink: false,
+                linkType: null
+              });
+            }
+            renderedText += formatting.content;
+          } else {
+            const nested = this.createPositionMap(
+              formatting.content,
+              baseOffset + sourcePos + formatting.startOffset
+            );
+            const renderedBase = renderedText.length;
+            for (const entry of nested.map) {
+              map.push({
+                ...entry,
+                renderedPos: entry.renderedPos + renderedBase,
+              });
+            }
+            renderedText += nested.renderedText;
           }
 
-          renderedText += formatting.content;
           sourcePos += formatting.fullLength;
           continue;
         }
@@ -573,8 +811,8 @@ class ReadingHighlighterPlugin extends Plugin {
 
       // 일반 문자
       map.push({
-        sourceStart: sourcePos,
-        sourceEnd: sourcePos + 1,
+        sourceStart: baseOffset + sourcePos,
+        sourceEnd: baseOffset + sourcePos + 1,
         renderedPos: renderedText.length,
         isInLink: false,
         linkType: null
@@ -591,47 +829,88 @@ class ReadingHighlighterPlugin extends Plugin {
   detectFormatting(source, pos) {
     const remaining = source.slice(pos);
 
-    // 굵게: **텍스트**
-    const boldMatch = remaining.match(/^\*\*(.*?)\*\*/);
-    if (boldMatch) {
-      return {
-        content: boldMatch[1],
-        startOffset: 2,
-        fullLength: boldMatch[0].length
-      };
-    }
+    const codeSpan = this.detectCodeSpan(remaining);
+    if (codeSpan) return codeSpan;
 
-    // 이탤릭: *텍스트*
-    const italicMatch = remaining.match(/^\*(.*?)\*/);
-    if (italicMatch) {
-      return {
-        content: italicMatch[1],
-        startOffset: 1,
-        fullLength: italicMatch[0].length
-      };
-    }
+    // 긴 delimiter를 먼저 처리해 중첩/복합 서식 우선 인식
+    const delimiters = ["***", "___", "**", "__", "~~", "==", "*", "_"];
+    for (const delimiter of delimiters) {
+      if (!remaining.startsWith(delimiter)) continue;
+      if (delimiter.includes("_") && !this.isUnderscoreOpeningValid(source, pos, delimiter.length)) {
+        continue;
+      }
 
-    // 하이라이트: ==텍스트==
-    const highlightMatch = remaining.match(/^==(.*?)==/);
-    if (highlightMatch) {
-      return {
-        content: highlightMatch[1],
-        startOffset: 2,
-        fullLength: highlightMatch[0].length
-      };
-    }
+      const closeIndex = this.findClosingDelimiter(remaining, delimiter);
+      if (closeIndex <= delimiter.length) continue;
 
-    // 인라인 코드: `텍스트`
-    const codeMatch = remaining.match(/^`([^`]+)`/);
-    if (codeMatch) {
       return {
-        content: codeMatch[1],
-        startOffset: 1,
-        fullLength: codeMatch[0].length
+        content: remaining.slice(delimiter.length, closeIndex),
+        startOffset: delimiter.length,
+        fullLength: closeIndex + delimiter.length,
+        isCode: false,
       };
     }
 
     return null;
+  }
+
+  detectCodeSpan(text) {
+    if (!text.startsWith("`")) return null;
+    const closeIndex = text.indexOf("`", 1);
+    if (closeIndex <= 1) return null;
+
+    return {
+      content: text.slice(1, closeIndex),
+      startOffset: 1,
+      fullLength: closeIndex + 1,
+      isCode: true,
+    };
+  }
+
+  findClosingDelimiter(text, delimiter) {
+    let searchFrom = delimiter.length;
+    while (searchFrom <= text.length - delimiter.length) {
+      const index = text.indexOf(delimiter, searchFrom);
+      if (index === -1) return -1;
+
+      // 이스케이프된 delimiter는 닫힘으로 보지 않음
+      if (text[index - 1] === "\\") {
+        searchFrom = index + delimiter.length;
+        continue;
+      }
+
+      if (
+        delimiter.includes("_") &&
+        !this.isUnderscoreClosingValid(text, index, delimiter.length)
+      ) {
+        searchFrom = index + delimiter.length;
+        continue;
+      }
+
+      return index;
+    }
+
+    return -1;
+  }
+
+  isUnderscoreOpeningValid(source, pos, delimiterLength) {
+    const before = pos > 0 ? source[pos - 1] : "";
+    const after = source[pos + delimiterLength] ?? "";
+    if (!after || /\s/.test(after)) return false;
+    if (this.isWordLike(before) && this.isWordLike(after)) return false;
+    return true;
+  }
+
+  isUnderscoreClosingValid(text, index, delimiterLength) {
+    const before = index > 0 ? text[index - 1] : "";
+    const after = text[index + delimiterLength] ?? "";
+    if (!before || /\s/.test(before)) return false;
+    if (this.isWordLike(before) && this.isWordLike(after)) return false;
+    return true;
+  }
+
+  isWordLike(char) {
+    return !!char && /[\p{L}\p{N}]/u.test(char);
   }
 
   /*────────── 최적 매칭 탐색 ──────────*/
