@@ -5,6 +5,25 @@
   padding: 0 0.1em;
 }
 
+/* Theme-specific floating button colors */
+:root {
+  --reading-highlighter-float-bg: #ffe347;
+  --reading-highlighter-float-fg: #3a2f00;
+  --reading-highlighter-float-border: #c9a900;
+}
+
+.theme-light {
+  --reading-highlighter-float-bg: #ffe347;
+  --reading-highlighter-float-fg: #3a2f00;
+  --reading-highlighter-float-border: #c9a900;
+}
+
+.theme-dark {
+  --reading-highlighter-float-bg: #b8ff2c;
+  --reading-highlighter-float-fg: #1b1b1b;
+  --reading-highlighter-float-border: #6f9c00;
+}
+
 /* Floating highlight action button */
 .reading-highlighter-float-btn {
   position: fixed;
@@ -16,10 +35,10 @@
   align-items: center;
   justify-content: center;
   padding: 10px 15px;
-  border: none;
+  border: 1px solid var(--reading-highlighter-float-border);
   border-radius: 8px;
-  background-color: var(--text-highlight-bg, #ffe347);
-  color: #ffffff;
+  background-color: var(--reading-highlighter-float-bg);
+  color: var(--reading-highlighter-float-fg);
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
   cursor: pointer;
 }
@@ -31,4 +50,5 @@
 .reading-highlighter-float-btn.is-remove {
   background-color: var(--background-modifier-error, #c0392b);
   color: var(--text-on-accent, #ffffff);
+  border-color: transparent;
 }
