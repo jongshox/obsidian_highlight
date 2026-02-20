@@ -1,10 +1,10 @@
 {
   "id": "reading-highlighter",
   "name": "Reading Highlighter",
-  "version": "1.6",
+  "version": "1.6.1",
   "minAppVersion": "0.15.0",
-  "description": "Subraya texto seleccionado directamente en el modo lectura con un shortcut.",
-  "author": "Tintalectrónico ",
+  "description": "읽기 모드에서 선택한 텍스트를 단축키로 바로 하이라이트합니다.",
+  "author": "jongshox",
   "authorUrl": "https://alexochoa.es",
   "main": "main.js"
 }
