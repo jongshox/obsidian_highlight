@@ -181,10 +181,21 @@ class ReadingHighlighterPlugin extends Plugin {
       this.floatingButtonEl.setAttribute("aria-label", "선택한 하이라이트 지우기");
       this.floatingButtonEl.setAttribute("title", "하이라이트 지우기");
     } else {
-      setIcon(this.floatingButtonEl, "highlighter");
+      this.renderHighlighterIcon();
       this.floatingButtonEl.setAttribute("aria-label", "선택 영역 하이라이트");
       this.floatingButtonEl.setAttribute("title", "선택 영역 하이라이트");
     }
+  }
+
+  renderHighlighterIcon() {
+    if (!this.floatingButtonEl) return;
+    this.floatingButtonEl.innerHTML = `
+      <svg class="reading-highlighter-marker-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path class="marker-body" d="M13.5 3.5 20.5 10.5 12 19H5v-7z" />
+        <path class="marker-cap" d="M13.5 3.5 16 1l7 7-2.5 2.5z" />
+        <path class="marker-ink" d="M3 21h8" />
+      </svg>
+    `;
   }
 
   showFloatingButton() {
