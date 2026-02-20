@@ -86,6 +86,11 @@ class ReadingHighlighterPlugin extends Plugin {
     this.floatingButtonEl.style.color = "var(--text-on-accent)";
     this.floatingButtonEl.style.display = "none"; // 초기에는 숨김
 
+    // 버튼 클릭 시 텍스트 선택이 해제되지 않도록 mousedown 기본 동작 차단
+    this.registerDomEvent(this.floatingButtonEl, "mousedown", (evt) => {
+      evt.preventDefault();
+    });
+
     this.registerDomEvent(this.floatingButtonEl, "click", () => {
       const view = this.app.workspace.getActiveViewOfType(MarkdownView);
       if (view && view.getMode() === "preview") {
