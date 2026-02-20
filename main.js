@@ -10,6 +10,7 @@ class ReadingHighlighterPlugin extends Plugin {
     this.addCommand({
       id: "highlight-selection-reading",
       name: "읽기 모드에서 선택 영역 하이라이트",
+      hotkeys: [{ modifiers: ["Shift"], key: "H" }],
       checkCallback: (checking) => {
         const view = this.app.workspace.getActiveViewOfType(MarkdownView);
         if (!view || view.getMode() !== "preview") return false;
@@ -17,17 +18,6 @@ class ReadingHighlighterPlugin extends Plugin {
         this.highlightSelection(view);
         return true;
       },
-    });
-
-    /*── 데스크톱 키보드 단축키 (Shift+H) ──*/
-    this.registerDomEvent(document, "keydown", (evt) => {
-      if (evt.shiftKey && evt.key === "H") {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
-        if (view && view.getMode() === "preview") {
-          this.highlightSelection(view);
-          evt.preventDefault();
-        }
-      }
     });
 
     /*── 리본 아이콘 (모바일 전용) ──*/
@@ -71,21 +61,6 @@ class ReadingHighlighterPlugin extends Plugin {
     this.floatingButtonEl.setAttribute("aria-label", "선택 영역 하이라이트");
     this.floatingButtonEl.addClass("reading-highlighter-float-btn");
 
-    // 기본 스타일 (더 나은 관리를 위해 styles.css로 이동 권장)
-    this.floatingButtonEl.style.position = "fixed";
-    this.floatingButtonEl.style.bottom = "30px";
-    this.floatingButtonEl.style.left = "50%";
-    this.floatingButtonEl.style.transform = "translateX(-50%)";
-    this.floatingButtonEl.style.zIndex = "1000"; // 다른 요소 위에 표시되도록 높은 z-index
-    this.floatingButtonEl.style.padding = "10px 15px";
-    this.floatingButtonEl.style.border = "none";
-    this.floatingButtonEl.style.borderRadius = "8px";
-    this.floatingButtonEl.style.cursor = "pointer";
-    this.floatingButtonEl.style.boxShadow = "0 4px 8px rgba(0,0,0,0.2)";
-    this.floatingButtonEl.style.backgroundColor = "var(--interactive-accent)";
-    this.floatingButtonEl.style.color = "var(--text-on-accent)";
-    this.floatingButtonEl.style.display = "none"; // 초기에는 숨김
-
     // 버튼 클릭 시 텍스트 선택이 해제되지 않도록 mousedown 기본 동작 차단
     this.registerDomEvent(this.floatingButtonEl, "mousedown", (evt) => {
       evt.preventDefault();
@@ -121,13 +96,13 @@ class ReadingHighlighterPlugin extends Plugin {
 
   showFloatingButton() {
     if (this.floatingButtonEl) {
-      this.floatingButtonEl.style.display = "block";
+      this.floatingButtonEl.classList.add("is-visible");
     }
   }
 
   hideFloatingButton() {
     if (this.floatingButtonEl) {
-      this.floatingButtonEl.style.display = "none";
+      this.floatingButtonEl.classList.remove("is-visible");
     }
   }
 
@@ -148,25 +123,12 @@ class ReadingHighlighterPlugin extends Plugin {
     const raw = await this.app.vault.read(file);
 
     /* 3. 선택 영역의 소스 위치 찾기 */
-    let a_orig, b_orig;
-    const a1 = this.posViaSourcePos(sel?.anchorNode);
-    const b1 = this.posViaSourcePos(sel?.focusNode);
-
-    if (a1 != null && b1 != null) {
-      [a_orig, b_orig] = [Math.min(a1, b1), Math.max(a1, b1)];
-    } else {
-      const pos_fallback = this.findMatchWithLinks(raw, snippet);
-      if (pos_fallback[0] == null || pos_fallback[1] == null) {
-        new Notice("파일에서 선택 영역의 위치를 찾을 수 없습니다.");
-        return;
-      }
-      [a_orig, b_orig] = pos_fallback;
-    }
-
-    if (a_orig == null || b_orig == null) {
+    const sourceRange = this.resolveSelectionRange(raw, snippet, sel);
+    if (!sourceRange) {
       new Notice("파일에서 선택 영역의 위치를 찾을 수 없습니다.");
       return;
     }
+    let [a_orig, b_orig] = sourceRange;
 
     let currentA = a_orig;
     let currentB = b_orig;
@@ -190,10 +152,15 @@ class ReadingHighlighterPlugin extends Plugin {
             // 하이라이트할 텍스트 앞에 서식 기호를 포함하고
             // 시작 위치 currentA를 앞으로 조정
             textToHighlight = prefixDef.md + textToHighlight;
-            currentA -= prefixDef.md.length;
+            currentA = Math.max(0, currentA - prefixDef.md.length);
             // 해당 접두사를 찾았으면 중단 (더 짧은 패턴이 중복 적용되지 않도록)
             break;
         }
+    }
+
+    if (this.overlapsProtectedRange(raw, currentA, currentB)) {
+      new Notice("코드 블록 또는 frontmatter 내부는 하이라이트할 수 없습니다.");
+      return;
     }
 
     /* 4. 선택된 텍스트를 단락별로 처리하여 하이라이트 추가 */
@@ -211,6 +178,129 @@ class ReadingHighlighterPlugin extends Plugin {
     });
 
     sel?.removeAllRanges();
+  }
+
+  /*────────── 선택 범위 결정/검증 ──────────*/
+  resolveSelectionRange(raw, snippet, sel) {
+    const a1 = this.posViaSourcePos(sel?.anchorNode);
+    const b1 = this.posViaSourcePos(sel?.focusNode);
+
+    if (a1 != null && b1 != null) {
+      const roughStart = Math.min(a1, b1);
+      const roughEnd = Math.max(a1, b1);
+      const refined = this.refineRangeWithinBounds(raw, snippet, roughStart, roughEnd);
+      if (refined) return refined;
+    }
+
+    const fallback = this.findMatchWithLinks(raw, snippet);
+    if (fallback[0] == null || fallback[1] == null) return null;
+    return fallback;
+  }
+
+  refineRangeWithinBounds(raw, snippet, start, end) {
+    if (start < 0 || end > raw.length || start >= end) return null;
+
+    const fragment = raw.slice(start, end);
+    const localMatch = this.findMatchWithLinks(fragment, snippet);
+    if (localMatch[0] == null || localMatch[1] == null) return null;
+
+    const candidateStart = start + localMatch[0];
+    const candidateEnd = start + localMatch[1];
+    const candidateText = raw.slice(candidateStart, candidateEnd);
+    if (!this.selectionMatchesRange(candidateText, snippet)) return null;
+
+    return [candidateStart, candidateEnd];
+  }
+
+  selectionMatchesRange(sourceRangeText, snippet) {
+    const normalizedSnippet = this.normalizeSpaces(snippet);
+    if (!normalizedSnippet) return false;
+
+    const renderedText = this.createPositionMap(sourceRangeText).renderedText;
+    return this.normalizeSpaces(renderedText) === normalizedSnippet;
+  }
+
+  normalizeSpaces(text) {
+    return (text ?? "").replace(/\s+/g, " ").trim();
+  }
+
+  /*────────── 보호 구간(frontmatter/code fence) 검사 ──────────*/
+  overlapsProtectedRange(source, start, end) {
+    const protectedRanges = this.findProtectedRanges(source);
+    return protectedRanges.some(
+      ([rangeStart, rangeEnd]) => start < rangeEnd && end > rangeStart
+    );
+  }
+
+  findProtectedRanges(source) {
+    return [
+      ...this.findFrontmatterRange(source),
+      ...this.findFencedCodeRanges(source),
+    ];
+  }
+
+  findFrontmatterRange(source) {
+    const lines = source.split("\n");
+    if (lines.length === 0 || lines[0].trim() !== "---") return [];
+
+    let offset = lines[0].length + (lines.length > 1 ? 1 : 0);
+    for (let i = 1; i < lines.length; i++) {
+      const hasNewline = i < lines.length - 1;
+      const lineLength = lines[i].length + (hasNewline ? 1 : 0);
+      const trimmed = lines[i].trim();
+
+      if (trimmed === "---" || trimmed === "...") {
+        return [[0, offset + lineLength]];
+      }
+
+      offset += lineLength;
+    }
+
+    return [];
+  }
+
+  findFencedCodeRanges(source) {
+    const lines = source.split("\n");
+    const ranges = [];
+    let offset = 0;
+    let openFence = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const hasNewline = i < lines.length - 1;
+      const lineStart = offset;
+      const lineEnd = lineStart + line.length + (hasNewline ? 1 : 0);
+      const trimmed = line.trimStart();
+
+      if (!openFence) {
+        const openMatch = trimmed.match(/^(`{3,}|~{3,})/);
+        if (openMatch) {
+          openFence = {
+            marker: openMatch[1][0],
+            length: openMatch[1].length,
+            start: lineStart,
+          };
+        }
+      } else {
+        const closeMatch = trimmed.match(/^(`{3,}|~{3,})\s*$/);
+        if (
+          closeMatch &&
+          closeMatch[1][0] === openFence.marker &&
+          closeMatch[1].length >= openFence.length
+        ) {
+          ranges.push([openFence.start, lineEnd]);
+          openFence = null;
+        }
+      }
+
+      offset = lineEnd;
+    }
+
+    if (openFence) {
+      ranges.push([openFence.start, source.length]);
+    }
+
+    return ranges;
   }
 
   /*────────── 단락별 하이라이트 추가 ──────────*/
