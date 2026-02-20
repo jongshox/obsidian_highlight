@@ -19,7 +19,7 @@
   border: none;
   border-radius: 8px;
   background-color: var(--text-highlight-bg, #ffe347);
-  color: #2b2b2b;
+  color: #ffffff;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
   cursor: pointer;
 }
