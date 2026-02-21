@@ -8,19 +8,19 @@
 /* Theme-specific floating button colors */
 :root {
   --reading-highlighter-float-bg: #ffe347;
-  --reading-highlighter-float-fg: #ffffff;
+  --reading-highlighter-float-fg: #111111;
   --reading-highlighter-float-border: #c9a900;
 }
 
 .theme-light {
   --reading-highlighter-float-bg: #ffe347;
-  --reading-highlighter-float-fg: #ffffff;
+  --reading-highlighter-float-fg: #111111;
   --reading-highlighter-float-border: #c9a900;
 }
 
 .theme-dark {
   --reading-highlighter-float-bg: #ffe347;
-  --reading-highlighter-float-fg: #ffffff;
+  --reading-highlighter-float-fg: #111111;
   --reading-highlighter-float-border: #ffe347;
 }
 
@@ -47,7 +47,7 @@
 .reading-highlighter-float-btn:not(.is-remove) {
   background-color: var(--reading-highlighter-float-bg) !important;
   border-color: var(--reading-highlighter-float-border) !important;
-  color: var(--reading-highlighter-float-fg) !important;
+  color: #111111 !important;
 }
 
 .reading-highlighter-float-btn.is-visible {
@@ -56,6 +56,6 @@
 
 .reading-highlighter-float-btn.is-remove {
   background-color: var(--background-modifier-error, #c0392b);
-  color: var(--text-on-accent, #ffffff);
+  color: #ffffff !important;
   border-color: transparent;
 }
