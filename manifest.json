@@ -1,7 +1,7 @@
 {
   "id": "reading-highlighter",
   "name": "Reading Highlighter",
-  "version": "1.7",
+  "version": "1.7.1",
   "minAppVersion": "0.15.0",
   "description": "읽기 모드에서 선택한 텍스트를 단축키로 바로 하이라이트합니다.",
   "author": "jongshox",

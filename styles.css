@@ -19,9 +19,9 @@
 }
 
 .theme-dark {
-  --reading-highlighter-float-bg: var(--text-highlight-bg, #ffe347);
+  --reading-highlighter-float-bg: #ffe347;
   --reading-highlighter-float-fg: #1b1b1b;
-  --reading-highlighter-float-border: var(--text-highlight-bg, #ffe347);
+  --reading-highlighter-float-border: #ffe347;
 }
 
 /* Floating highlight action button */
