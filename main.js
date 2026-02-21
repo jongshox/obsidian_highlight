@@ -746,6 +746,15 @@ class ReadingHighlighterPlugin extends Plugin {
       const char = source[sourcePos];
       const prevChar = sourcePos > 0 ? source[sourcePos - 1] : "";
 
+      // 인라인 HTML 태그는 렌더링 텍스트에서 제거됨 (예: <a id="..."></a>)
+      if (char === "<" && prevChar !== "\\") {
+        const htmlTag = this.detectInlineHtmlTag(source, sourcePos);
+        if (htmlTag) {
+          sourcePos += htmlTag.length;
+          continue;
+        }
+      }
+
       // 마크다운 링크 감지: [텍스트](url)
       if (char === '[' && prevChar !== "\\") {
         const mdLinkMatch = source.slice(sourcePos).match(/^\[([^\]]+)\]\([^)]*\)/);
@@ -887,6 +896,18 @@ class ReadingHighlighterPlugin extends Plugin {
       fullLength: closeIndex + 1,
       isCode: true,
     };
+  }
+
+  detectInlineHtmlTag(source, pos) {
+    const remaining = source.slice(pos);
+
+    const commentMatch = remaining.match(/^<!--[\s\S]*?-->/);
+    if (commentMatch) return commentMatch[0];
+
+    const tagMatch = remaining.match(/^<\/?[A-Za-z][^>\n]*>/);
+    if (tagMatch) return tagMatch[0];
+
+    return null;
   }
 
   findClosingDelimiter(text, delimiter) {
