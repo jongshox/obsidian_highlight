@@ -21,7 +21,7 @@
 .theme-dark {
   --reading-highlighter-float-bg: #b8ff2c;
   --reading-highlighter-float-fg: #1b1b1b;
-  --reading-highlighter-float-border: #6f9c00;
+  --reading-highlighter-float-border: var(--text-highlight-bg, #ffe347);
 }
 
 /* Floating highlight action button */
@@ -41,6 +41,13 @@
   color: var(--reading-highlighter-float-fg);
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
   cursor: pointer;
+}
+
+/* Prevent theme overrides in highlight mode */
+.reading-highlighter-float-btn:not(.is-remove) {
+  background-color: var(--reading-highlighter-float-bg) !important;
+  border-color: var(--reading-highlighter-float-border) !important;
+  color: var(--reading-highlighter-float-fg) !important;
 }
 
 .reading-highlighter-float-btn.is-visible {
