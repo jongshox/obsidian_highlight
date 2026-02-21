@@ -19,7 +19,7 @@
 }
 
 .theme-dark {
-  --reading-highlighter-float-bg: #b8ff2c;
+  --reading-highlighter-float-bg: var(--text-highlight-bg, #ffe347);
   --reading-highlighter-float-fg: #1b1b1b;
   --reading-highlighter-float-border: var(--text-highlight-bg, #ffe347);
 }
