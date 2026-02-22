@@ -163,50 +163,68 @@ class ReadingHighlighterPlugin extends Plugin {
     if (!this.isSelectionInActiveView(sel, view)) return;
 
     const snippet = sel?.toString() ?? "";
-    if (!this.normalizeSpaces(snippet) || !sel?.anchorNode || !sel?.focusNode) return;
+    if (!this.normalizeSpaces(snippet)) return;
+
+    const roughBounds = this.getRoughBoundsFromNodes(sel?.anchorNode ?? null, sel?.focusNode ?? null);
 
     this.lastSelectionSnapshot = {
       snippet,
-      anchorNode: sel.anchorNode,
-      focusNode: sel.focusNode,
+      anchorNode: sel?.anchorNode ?? null,
+      focusNode: sel?.focusNode ?? null,
+      roughStart: roughBounds.roughStart,
+      roughEnd: roughBounds.roughEnd,
       capturedAt: Date.now(),
+    };
+  }
+
+  getRoughBoundsFromNodes(anchorNode, focusNode) {
+    const a1 = this.posViaSourcePos(anchorNode);
+    const b1 = this.posViaSourcePos(focusNode);
+    if (a1 == null || b1 == null) {
+      return { roughStart: null, roughEnd: null };
+    }
+    return {
+      roughStart: Math.min(a1, b1),
+      roughEnd: Math.max(a1, b1),
     };
   }
 
   getEffectiveSelection(view) {
     const sel = document.getSelection();
     if (this.isSelectionInActiveView(sel, view)) {
+      const roughBounds = this.getRoughBoundsFromNodes(sel?.anchorNode ?? null, sel?.focusNode ?? null);
       return {
         snippet: sel?.toString() ?? "",
         anchorNode: sel?.anchorNode ?? null,
         focusNode: sel?.focusNode ?? null,
+        roughStart: roughBounds.roughStart,
+        roughEnd: roughBounds.roughEnd,
       };
     }
 
     const snapshot = this.lastSelectionSnapshot;
     if (!snapshot) {
-      return { snippet: "", anchorNode: null, focusNode: null };
+      return { snippet: "", anchorNode: null, focusNode: null, roughStart: null, roughEnd: null };
     }
 
     // 오래된 스냅샷은 무시 (버튼 탭 직후 폴백 용도)
-    if (Date.now() - snapshot.capturedAt > 5000) {
-      return { snippet: "", anchorNode: null, focusNode: null };
+    if (Date.now() - snapshot.capturedAt > 8000) {
+      return { snippet: "", anchorNode: null, focusNode: null, roughStart: null, roughEnd: null };
     }
 
-    if (
+    const hasLiveSnapshotNodes =
       snapshot.anchorNode?.isConnected &&
       snapshot.focusNode?.isConnected &&
       view.containerEl.contains(snapshot.anchorNode) &&
-      view.containerEl.contains(snapshot.focusNode)
-    ) {
-      return {
-        snippet: snapshot.snippet,
-        anchorNode: snapshot.anchorNode,
-        focusNode: snapshot.focusNode,
-      };
-    }
+      view.containerEl.contains(snapshot.focusNode);
 
-    return { snippet: "", anchorNode: null, focusNode: null };
+    return {
+      snippet: snapshot.snippet ?? "",
+      anchorNode: hasLiveSnapshotNodes ? snapshot.anchorNode : null,
+      focusNode: hasLiveSnapshotNodes ? snapshot.focusNode : null,
+      roughStart: Number.isInteger(snapshot.roughStart) ? snapshot.roughStart : null,
+      roughEnd: Number.isInteger(snapshot.roughEnd) ? snapshot.roughEnd : null,
+    };
   }
 
   isSelectionInActiveView(sel, view) {
@@ -290,7 +308,9 @@ class ReadingHighlighterPlugin extends Plugin {
       raw,
       snippet,
       selection.anchorNode,
-      selection.focusNode
+      selection.focusNode,
+      selection.roughStart,
+      selection.roughEnd
     );
     if (!sourceRange) {
       new Notice("파일에서 선택 영역의 위치를 찾을 수 없습니다.");
@@ -475,15 +495,35 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
   /*────────── 선택 범위 결정/검증 ──────────*/
-  resolveSelectionRange(raw, snippet, anchorNode, focusNode) {
-    const a1 = this.posViaSourcePos(anchorNode);
-    const b1 = this.posViaSourcePos(focusNode);
+  resolveSelectionRange(raw, snippet, anchorNode, focusNode, roughStartHint = null, roughEndHint = null) {
+    const candidateBounds = [];
 
-    if (a1 != null && b1 != null) {
-      const roughStart = Math.min(a1, b1);
-      const roughEnd = Math.max(a1, b1);
+    const nodeBounds = this.getRoughBoundsFromNodes(anchorNode, focusNode);
+    if (nodeBounds.roughStart != null && nodeBounds.roughEnd != null) {
+      candidateBounds.push([nodeBounds.roughStart, nodeBounds.roughEnd]);
+    }
+
+    if (Number.isInteger(roughStartHint) && Number.isInteger(roughEndHint)) {
+      candidateBounds.push([
+        Math.min(roughStartHint, roughEndHint),
+        Math.max(roughStartHint, roughEndHint),
+      ]);
+    }
+
+    const seen = new Set();
+    for (const [roughStart, roughEnd] of candidateBounds) {
+      const key = `${roughStart}:${roughEnd}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
       const refined = this.refineRangeWithinBounds(raw, snippet, roughStart, roughEnd);
       if (refined) return refined;
+
+      // 동일 노드(sourcepos 동일) 또는 좁은 범위에서도 매칭되도록 주변을 넓혀 재탐색
+      const windowStart = Math.max(0, roughStart - 2500);
+      const windowEnd = Math.min(raw.length, roughEnd + Math.max(2500, snippet.length * 8));
+      const refinedAround = this.refineRangeWithinBounds(raw, snippet, windowStart, windowEnd);
+      if (refinedAround) return refinedAround;
 
       // 엄격 매칭 실패 시, sourcepos 기반 범위를 완화 조건으로 허용
       const roughText = raw.slice(roughStart, roughEnd);
@@ -817,6 +857,12 @@ class ReadingHighlighterPlugin extends Plugin {
     let sourcePos = 0;
 
     while (sourcePos < source.length) {
+      const hiddenPrefixLen = this.consumeHiddenBlockPrefix(source, sourcePos);
+      if (hiddenPrefixLen > 0) {
+        sourcePos += hiddenPrefixLen;
+        continue;
+      }
+
       const char = source[sourcePos];
       const prevChar = sourcePos > 0 ? source[sourcePos - 1] : "";
 
@@ -928,6 +974,58 @@ class ReadingHighlighterPlugin extends Plugin {
     }
 
     return { renderedText, map };
+  }
+
+  consumeHiddenBlockPrefix(source, pos) {
+    if (pos > 0 && source[pos - 1] !== "\n") return 0;
+
+    const remaining = source.slice(pos);
+    let consumed = 0;
+    let cursor = 0;
+
+    // Markdown block syntax generally allows up to 3 leading spaces.
+    while (cursor < 3 && remaining[cursor] === " ") {
+      cursor++;
+    }
+    const indentLen = cursor;
+
+    // Blockquote marker (can be nested like >> or > >).
+    let quoteLen = 0;
+    while (remaining[cursor + quoteLen] === ">") {
+      quoteLen += 1;
+      if (remaining[cursor + quoteLen] === " ") {
+        quoteLen += 1;
+      }
+    }
+
+    if (quoteLen > 0) {
+      consumed = indentLen + quoteLen;
+      cursor = consumed;
+    } else {
+      cursor = indentLen;
+    }
+
+    const rest = remaining.slice(cursor);
+
+    // Heading marker: ### ...
+    const heading = rest.match(/^#{1,6}\s+/);
+    if (heading) {
+      return cursor + heading[0].length;
+    }
+
+    // List marker: - / * / + / 1. / 1) with optional task checkbox.
+    const list = rest.match(/^(?:[-*+]\s+|\d+[.)]\s+)/);
+    if (list) {
+      let len = cursor + list[0].length;
+      const task = remaining.slice(len).match(/^\[(?: |x|X)\]\s+/);
+      if (task) len += task[0].length;
+      return len;
+    }
+
+    // Quote-only line: > text
+    if (consumed > 0) return consumed;
+
+    return 0;
   }
 
   /*────────── 마크다운 인라인 서식 감지 ──────────*/
