@@ -6,6 +6,7 @@ class ReadingHighlighterPlugin extends Plugin {
   boundHandleSelectionChange = null;
   floatingButtonMode = "highlight";
   pendingRemoveMarkEl = null;
+  lastSelectionSnapshot = null;
 
   onload() {
     /*── 명령어 팔레트에 명령 추가 ──*/
@@ -42,6 +43,7 @@ class ReadingHighlighterPlugin extends Plugin {
       this.app.workspace.on("active-leaf-change", () => {
         // 활성 탭이 변경될 때 버튼 상태 업데이트
         this.pendingRemoveMarkEl = null;
+        this.lastSelectionSnapshot = null;
         this.handleSelectionChange();
       })
     );
@@ -66,8 +68,16 @@ class ReadingHighlighterPlugin extends Plugin {
     this.floatingButtonEl.addClass("reading-highlighter-float-btn");
     this.setFloatingButtonMode("highlight");
 
-    // 버튼 클릭 시 텍스트 선택이 해제되지 않도록 mousedown 기본 동작 차단
+    // 버튼 터치/클릭 직전에 선택 스냅샷을 저장해 iOS에서도 선택 유실을 방지
+    const onButtonPress = () => {
+      this.captureCurrentSelectionSnapshot();
+    };
+    this.registerDomEvent(this.floatingButtonEl, "pointerdown", onButtonPress);
+    this.registerDomEvent(this.floatingButtonEl, "touchstart", onButtonPress, {
+      passive: true,
+    });
     this.registerDomEvent(this.floatingButtonEl, "mousedown", (evt) => {
+      this.captureCurrentSelectionSnapshot();
       evt.preventDefault();
     });
 
@@ -96,6 +106,7 @@ class ReadingHighlighterPlugin extends Plugin {
 
     const sel = document.getSelection();
     if (this.isSelectionInActiveView(sel, view)) {
+      this.captureSelectionSnapshot(sel, view);
       this.pendingRemoveMarkEl = null;
       this.setFloatingButtonMode("highlight");
       this.showFloatingButton();
@@ -129,6 +140,7 @@ class ReadingHighlighterPlugin extends Plugin {
       const snippet = this.normalizeSpaces(markEl.textContent ?? "");
       if (!snippet) return;
       this.pendingRemoveMarkEl = markEl;
+      this.lastSelectionSnapshot = null;
       const sel = document.getSelection();
       if (sel && !sel.isCollapsed) sel.removeAllRanges();
       this.setFloatingButtonMode("remove");
@@ -138,6 +150,63 @@ class ReadingHighlighterPlugin extends Plugin {
 
     this.pendingRemoveMarkEl = null;
     this.handleSelectionChange();
+  }
+
+  captureCurrentSelectionSnapshot() {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const sel = document.getSelection();
+    if (!view || view.getMode() !== "preview") return;
+    this.captureSelectionSnapshot(sel, view);
+  }
+
+  captureSelectionSnapshot(sel, view) {
+    if (!this.isSelectionInActiveView(sel, view)) return;
+
+    const snippet = sel?.toString() ?? "";
+    if (!this.normalizeSpaces(snippet) || !sel?.anchorNode || !sel?.focusNode) return;
+
+    this.lastSelectionSnapshot = {
+      snippet,
+      anchorNode: sel.anchorNode,
+      focusNode: sel.focusNode,
+      capturedAt: Date.now(),
+    };
+  }
+
+  getEffectiveSelection(view) {
+    const sel = document.getSelection();
+    if (this.isSelectionInActiveView(sel, view)) {
+      return {
+        snippet: sel?.toString() ?? "",
+        anchorNode: sel?.anchorNode ?? null,
+        focusNode: sel?.focusNode ?? null,
+      };
+    }
+
+    const snapshot = this.lastSelectionSnapshot;
+    if (!snapshot) {
+      return { snippet: "", anchorNode: null, focusNode: null };
+    }
+
+    // 오래된 스냅샷은 무시 (버튼 탭 직후 폴백 용도)
+    if (Date.now() - snapshot.capturedAt > 5000) {
+      return { snippet: "", anchorNode: null, focusNode: null };
+    }
+
+    if (
+      snapshot.anchorNode?.isConnected &&
+      snapshot.focusNode?.isConnected &&
+      view.containerEl.contains(snapshot.anchorNode) &&
+      view.containerEl.contains(snapshot.focusNode)
+    ) {
+      return {
+        snippet: snapshot.snippet,
+        anchorNode: snapshot.anchorNode,
+        focusNode: snapshot.focusNode,
+      };
+    }
+
+    return { snippet: "", anchorNode: null, focusNode: null };
   }
 
   isSelectionInActiveView(sel, view) {
@@ -202,8 +271,8 @@ class ReadingHighlighterPlugin extends Plugin {
 
   /*───────────────── 핵심 하이라이트 로직 ─────────────────*/
   async highlightSelection(view) {
-    const sel = document.getSelection();
-    const snippet = sel?.toString() ?? "";
+    const selection = this.getEffectiveSelection(view);
+    const snippet = selection.snippet ?? "";
     if (!snippet.trim()) {
       new Notice("먼저 텍스트를 선택하세요 — 선택된 내용이 없습니다.");
       return;
@@ -217,7 +286,12 @@ class ReadingHighlighterPlugin extends Plugin {
     const raw = await this.app.vault.read(file);
 
     /* 3. 선택 영역의 소스 위치 찾기 */
-    const sourceRange = this.resolveSelectionRange(raw, snippet, sel);
+    const sourceRange = this.resolveSelectionRange(
+      raw,
+      snippet,
+      selection.anchorNode,
+      selection.focusNode
+    );
     if (!sourceRange) {
       new Notice("파일에서 선택 영역의 위치를 찾을 수 없습니다.");
       return;
@@ -271,7 +345,7 @@ class ReadingHighlighterPlugin extends Plugin {
       setTimeout(restore, 50);
     });
 
-    sel?.removeAllRanges();
+    document.getSelection()?.removeAllRanges();
   }
 
   async removeClickedHighlight(view) {
@@ -401,9 +475,9 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
   /*────────── 선택 범위 결정/검증 ──────────*/
-  resolveSelectionRange(raw, snippet, sel) {
-    const a1 = this.posViaSourcePos(sel?.anchorNode);
-    const b1 = this.posViaSourcePos(sel?.focusNode);
+  resolveSelectionRange(raw, snippet, anchorNode, focusNode) {
+    const a1 = this.posViaSourcePos(anchorNode);
+    const b1 = this.posViaSourcePos(focusNode);
 
     if (a1 != null && b1 != null) {
       const roughStart = Math.min(a1, b1);
