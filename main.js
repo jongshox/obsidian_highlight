@@ -316,46 +316,21 @@ class ReadingHighlighterPlugin extends Plugin {
       new Notice("파일에서 선택 영역의 위치를 찾을 수 없습니다.");
       return;
     }
-    let [a_orig, b_orig] = sourceRange;
-
-    let currentA = a_orig;
-    let currentB = b_orig;
-    let textToHighlight = raw.slice(currentA, currentB);
-    const textBeforeSelection = raw.slice(0, currentA);
-
-    // 가장 긴 것부터 순서대로 확인할 마크다운 인라인 서식 접두사 목록
-    // (선택 시작 바로 앞에 서식 기호가 있는 경우 처리)
-    const markdownPrefixes = [
-        { md: "***" },
-        { md: "___" },
-        { md: "**" },
-        { md: "__" },
-        { md: "*" },
-        { md: "_" },
-        { md: "`" }
-    ];
-
-    for (const prefixDef of markdownPrefixes) {
-        if (textBeforeSelection.endsWith(prefixDef.md)) {
-            // 하이라이트할 텍스트 앞에 서식 기호를 포함하고
-            // 시작 위치 currentA를 앞으로 조정
-            textToHighlight = prefixDef.md + textToHighlight;
-            currentA = Math.max(0, currentA - prefixDef.md.length);
-            // 해당 접두사를 찾았으면 중단 (더 짧은 패턴이 중복 적용되지 않도록)
-            break;
-        }
+    const adjustedRange = this.adjustHighlightRange(raw, sourceRange[0], sourceRange[1]);
+    if (!adjustedRange) {
+      new Notice("선택 영역의 경계를 조정할 수 없습니다.");
+      return;
     }
+
+    const [currentA, currentB] = adjustedRange;
 
     if (this.overlapsProtectedRange(raw, currentA, currentB)) {
       new Notice("코드 블록 또는 frontmatter 내부는 하이라이트할 수 없습니다.");
       return;
     }
 
-    /* 4. 선택된 텍스트를 단락별로 처리하여 하이라이트 추가 */
-    const updatedText = this.addHighlightsByParagraph(textToHighlight);
-
-    /* 5. 파일에서 해당 범위를 교체하여 저장 */
-    const updated = raw.slice(0, currentA) + updatedText + raw.slice(currentB);
+    /* 4. 파일에서 해당 범위를 교체하여 저장 */
+    const updated = this.applyHighlightToSource(raw, currentA, currentB);
     await this.app.vault.modify(file, updated);
 
     /* 6. 스크롤 위치 복원 (두 번 적용하여 안정적으로 복원) */
@@ -413,6 +388,101 @@ class ReadingHighlighterPlugin extends Plugin {
 
     this.pendingRemoveMarkEl = null;
     document.getSelection()?.removeAllRanges();
+  }
+
+  applyHighlightToSource(source, start, end) {
+    const textToHighlight = source.slice(start, end);
+    const updatedText = this.addHighlightsByParagraph(textToHighlight);
+    return source.slice(0, start) + updatedText + source.slice(end);
+  }
+
+  adjustHighlightRange(source, start, end) {
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 0 ||
+      end > source.length ||
+      start >= end
+    ) {
+      return null;
+    }
+
+    const windowStart = Math.max(0, start - 1500);
+    const windowEnd = Math.min(source.length, end + 1500);
+    const positionMap = this.createPositionMap(source.slice(windowStart, windowEnd), windowStart);
+    const wrappers = this.collectWrappersForRange(positionMap.map, start, end);
+
+    if (wrappers.length === 0) {
+      return [start, end];
+    }
+
+    let currentStart = start;
+    let currentEnd = end;
+    let changed = true;
+
+    while (changed) {
+      changed = false;
+
+      for (const wrapper of wrappers) {
+        if (currentEnd <= wrapper.start || currentStart >= wrapper.end) continue;
+
+        const startsInside = currentStart > wrapper.start && currentStart < wrapper.end;
+        const endsInside = currentEnd > wrapper.start && currentEnd < wrapper.end;
+        const isContainedByWrapper =
+          currentStart >= wrapper.start && currentEnd <= wrapper.end;
+
+        if (
+          this.wrapperRequiresWholeSelection(wrapper) &&
+          isContainedByWrapper &&
+          (currentStart > wrapper.start || currentEnd < wrapper.end)
+        ) {
+          if (currentStart !== wrapper.start) {
+            currentStart = wrapper.start;
+            changed = true;
+          }
+          if (currentEnd !== wrapper.end) {
+            currentEnd = wrapper.end;
+            changed = true;
+          }
+          continue;
+        }
+
+        if (startsInside && currentEnd >= wrapper.end && currentStart !== wrapper.start) {
+          currentStart = wrapper.start;
+          changed = true;
+        }
+
+        if (endsInside && currentStart <= wrapper.start && currentEnd !== wrapper.end) {
+          currentEnd = wrapper.end;
+          changed = true;
+        }
+      }
+    }
+
+    return currentStart < currentEnd ? [currentStart, currentEnd] : null;
+  }
+
+  collectWrappersForRange(map, start, end) {
+    const wrappers = new Map();
+
+    for (const entry of map) {
+      if (entry.sourceEnd <= start || entry.sourceStart >= end) continue;
+
+      for (const wrapper of entry.wrappers ?? []) {
+        const key = `${wrapper.kind}:${wrapper.start}:${wrapper.end}:${wrapper.delimiter ?? ""}`;
+        if (!wrappers.has(key)) wrappers.set(key, wrapper);
+      }
+    }
+
+    return [...wrappers.values()].sort((a, b) => (a.end - a.start) - (b.end - b.start));
+  }
+
+  wrapperRequiresWholeSelection(wrapper) {
+    return (
+      wrapper.kind === "markdownLink" ||
+      wrapper.kind === "wikiLink" ||
+      wrapper.kind === "code"
+    );
   }
 
   resolveHighlightWrapperRange(source, markEl, snippet) {
@@ -516,13 +586,25 @@ class ReadingHighlighterPlugin extends Plugin {
       if (seen.has(key)) continue;
       seen.add(key);
 
-      const refined = this.refineRangeWithinBounds(raw, snippet, roughStart, roughEnd);
+      const refined = this.refineRangeWithinBounds(
+        raw,
+        snippet,
+        roughStart,
+        roughEnd,
+        roughStart
+      );
       if (refined) return refined;
 
       // 동일 노드(sourcepos 동일) 또는 좁은 범위에서도 매칭되도록 주변을 넓혀 재탐색
       const windowStart = Math.max(0, roughStart - 2500);
       const windowEnd = Math.min(raw.length, roughEnd + Math.max(2500, snippet.length * 8));
-      const refinedAround = this.refineRangeWithinBounds(raw, snippet, windowStart, windowEnd);
+      const refinedAround = this.refineRangeWithinBounds(
+        raw,
+        snippet,
+        windowStart,
+        windowEnd,
+        roughStart
+      );
       if (refinedAround) return refinedAround;
 
       // 엄격 매칭 실패 시, sourcepos 기반 범위를 완화 조건으로 허용
@@ -532,16 +614,21 @@ class ReadingHighlighterPlugin extends Plugin {
       }
     }
 
-    const fallback = this.findMatchWithLinks(raw, snippet);
+    const fallbackHint =
+      Number.isInteger(roughStartHint) && roughStartHint >= 0 ? roughStartHint : null;
+    const fallback = this.findMatchWithLinks(raw, snippet, fallbackHint);
     if (fallback[0] == null || fallback[1] == null) return null;
     return fallback;
   }
 
-  refineRangeWithinBounds(raw, snippet, start, end) {
+  refineRangeWithinBounds(raw, snippet, start, end, preferredSourcePos = null) {
     if (start < 0 || end > raw.length || start >= end) return null;
 
     const fragment = raw.slice(start, end);
-    const localMatch = this.findMatchWithLinks(fragment, snippet);
+    const localPreferredPos = Number.isInteger(preferredSourcePos)
+      ? Math.max(0, Math.min(fragment.length, preferredSourcePos - start))
+      : null;
+    const localMatch = this.findMatchWithLinks(fragment, snippet, localPreferredPos);
     if (localMatch[0] == null || localMatch[1] == null) return null;
 
     const candidateStart = start + localMatch[0];
@@ -830,24 +917,110 @@ class ReadingHighlighterPlugin extends Plugin {
 
 
   /*────────── 링크 포함 텍스트 매칭 (폴백 탐색) ──────────*/
-  findMatchWithLinks(source, snippet) {
-    /* A. 고유한 직접 매칭 시도 */
-    const direct = this.uniqueDirectMatch(source, snippet);
-    if (direct[0] != null) return direct;
+  findMatchWithLinks(source, snippet, preferredSourcePos = null) {
+    const candidates = [];
 
-    /* B. 위치 맵 생성 후 렌더링된 텍스트에서 검색 */
-    const positionMap = this.createPositionMap(source);
-    const rendered = positionMap.renderedText;
-
-    // 렌더링된 텍스트에서 매칭 탐색
-    const renderedMatch = this.findBestMatch(rendered, snippet);
-    if (renderedMatch[0] != null) {
-      // 렌더링 텍스트의 위치를 마크다운 소스 위치로 변환
-      return this.mapRenderedPositionsToSource(positionMap, renderedMatch);
+    for (const range of this.findDirectMatches(source, snippet)) {
+      candidates.push(range);
     }
 
-    /* C. 유연한 매칭 (마지막 폴백) */
-    return this.findFlexibleMatch(source, snippet);
+    const positionMap = this.createPositionMap(source);
+    for (const renderedRange of this.findRenderedMatchCandidates(positionMap.renderedText, snippet)) {
+      const mappedRange = this.mapRenderedPositionsToSource(positionMap, renderedRange);
+      if (mappedRange[0] == null || mappedRange[1] == null) continue;
+
+      const candidateText = source.slice(mappedRange[0], mappedRange[1]);
+      if (!this.selectionMatchesRange(candidateText, snippet)) continue;
+      candidates.push(mappedRange);
+    }
+
+    const picked = this.pickBestCandidateRange(candidates, preferredSourcePos);
+    if (picked) return picked;
+
+    return this.findFlexibleMatch(source, snippet, preferredSourcePos);
+  }
+
+  findDirectMatches(source, snippet) {
+    const query = snippet.trim();
+    if (!query) return [];
+
+    return this.findAllOccurrences(source, query);
+  }
+
+  findRenderedMatchCandidates(text, snippet) {
+    const normalizedSnippet = snippet.trim();
+    if (!normalizedSnippet) return [];
+
+    const exactMatches = this.findAllOccurrences(text, normalizedSnippet);
+    if (exactMatches.length > 0) return exactMatches;
+
+    const normalizedText = text.replace(/\s+/g, ' ');
+    const normalizedSnippetSpaces = normalizedSnippet.replace(/\s+/g, ' ');
+    const matches = [];
+    let pos = 0;
+
+    while ((pos = normalizedText.indexOf(normalizedSnippetSpaces, pos)) !== -1) {
+      const mapped = this.mapNormalizedToOriginal(text, normalizedText, [
+        pos,
+        pos + normalizedSnippetSpaces.length,
+      ]);
+      if (mapped[0] != null && mapped[1] != null) {
+        matches.push(mapped);
+      }
+      pos++;
+    }
+
+    return matches;
+  }
+
+  findAllOccurrences(text, query) {
+    if (!query) return [];
+
+    const matches = [];
+    let pos = 0;
+    while ((pos = text.indexOf(query, pos)) !== -1) {
+      matches.push([pos, pos + query.length]);
+      pos++;
+    }
+    return matches;
+  }
+
+  pickBestCandidateRange(candidates, preferredSourcePos = null) {
+    if (!candidates.length) return null;
+
+    const unique = [];
+    const seen = new Set();
+    for (const [start, end] of candidates) {
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start >= end) continue;
+      const key = `${start}:${end}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push([start, end]);
+    }
+
+    if (unique.length === 0) return null;
+    if (unique.length === 1) return unique[0];
+    if (!Number.isInteger(preferredSourcePos)) return null;
+
+    unique.sort((a, b) => {
+      const distanceDiff =
+        this.rangeDistanceFromHint(a, preferredSourcePos) -
+        this.rangeDistanceFromHint(b, preferredSourcePos);
+      if (distanceDiff !== 0) return distanceDiff;
+
+      const spanDiff = (a[1] - a[0]) - (b[1] - b[0]);
+      if (spanDiff !== 0) return spanDiff;
+
+      return a[0] - b[0];
+    });
+
+    return unique[0];
+  }
+
+  rangeDistanceFromHint([start, end], preferredSourcePos) {
+    if (preferredSourcePos < start) return start - preferredSourcePos;
+    if (preferredSourcePos > end) return preferredSourcePos - end;
+    return 0;
   }
 
   /*────────── 위치 맵 생성 (마크다운 → 렌더링 텍스트) ──────────*/
@@ -881,6 +1054,11 @@ class ReadingHighlighterPlugin extends Plugin {
         if (mdLinkMatch) {
           const fullMatch = mdLinkMatch[0];
           const linkText = mdLinkMatch[1];
+          const wrapper = {
+            kind: 'markdownLink',
+            start: baseOffset + sourcePos,
+            end: baseOffset + sourcePos + fullMatch.length,
+          };
 
           // 링크 텍스트의 각 문자 위치 맵핑
           for (let i = 0; i < linkText.length; i++) {
@@ -889,7 +1067,8 @@ class ReadingHighlighterPlugin extends Plugin {
               sourceEnd: baseOffset + sourcePos + fullMatch.length,
               renderedPos: renderedText.length + i,
               isInLink: true,
-              linkType: 'markdown'
+              linkType: 'markdown',
+              wrappers: [wrapper],
             });
           }
 
@@ -903,6 +1082,11 @@ class ReadingHighlighterPlugin extends Plugin {
         if (wikiLinkMatch) {
           const fullMatch = wikiLinkMatch[0];
           const displayText = wikiLinkMatch[2] || wikiLinkMatch[1];
+          const wrapper = {
+            kind: 'wikiLink',
+            start: baseOffset + sourcePos,
+            end: baseOffset + sourcePos + fullMatch.length,
+          };
 
           // 표시 텍스트의 각 문자 위치 맵핑
           for (let i = 0; i < displayText.length; i++) {
@@ -911,7 +1095,8 @@ class ReadingHighlighterPlugin extends Plugin {
               sourceEnd: baseOffset + sourcePos + fullMatch.length,
               renderedPos: renderedText.length + i,
               isInLink: true,
-              linkType: 'wiki'
+              linkType: 'wiki',
+              wrappers: [wrapper],
             });
           }
 
@@ -929,6 +1114,12 @@ class ReadingHighlighterPlugin extends Plugin {
         const formatting = this.detectFormatting(source, sourcePos);
         if (formatting) {
           if (formatting.isCode) {
+            const wrapper = {
+              kind: 'code',
+              start: baseOffset + sourcePos,
+              end: baseOffset + sourcePos + formatting.fullLength,
+              delimiter: formatting.delimiter,
+            };
             for (let i = 0; i < formatting.content.length; i++) {
               const start = baseOffset + sourcePos + formatting.startOffset + i;
               map.push({
@@ -936,7 +1127,8 @@ class ReadingHighlighterPlugin extends Plugin {
                 sourceEnd: start + 1,
                 renderedPos: renderedText.length + i,
                 isInLink: false,
-                linkType: null
+                linkType: null,
+                wrappers: [wrapper],
               });
             }
             renderedText += formatting.content;
@@ -946,10 +1138,17 @@ class ReadingHighlighterPlugin extends Plugin {
               baseOffset + sourcePos + formatting.startOffset
             );
             const renderedBase = renderedText.length;
+            const wrapper = {
+              kind: 'formatting',
+              start: baseOffset + sourcePos,
+              end: baseOffset + sourcePos + formatting.fullLength,
+              delimiter: formatting.delimiter,
+            };
             for (const entry of nested.map) {
               map.push({
                 ...entry,
                 renderedPos: entry.renderedPos + renderedBase,
+                wrappers: [...(entry.wrappers ?? []), wrapper],
               });
             }
             renderedText += nested.renderedText;
@@ -966,7 +1165,8 @@ class ReadingHighlighterPlugin extends Plugin {
         sourceEnd: baseOffset + sourcePos + 1,
         renderedPos: renderedText.length,
         isInLink: false,
-        linkType: null
+        linkType: null,
+        wrappers: [],
       });
 
       renderedText += char;
@@ -1050,6 +1250,7 @@ class ReadingHighlighterPlugin extends Plugin {
         content: remaining.slice(delimiter.length, closeIndex),
         startOffset: delimiter.length,
         fullLength: closeIndex + delimiter.length,
+        delimiter,
         isCode: false,
       };
     }
@@ -1058,14 +1259,18 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
   detectCodeSpan(text) {
-    if (!text.startsWith("`")) return null;
-    const closeIndex = text.indexOf("`", 1);
-    if (closeIndex <= 1) return null;
+    const openMatch = text.match(/^(`+)/);
+    if (!openMatch) return null;
+
+    const delimiter = openMatch[1];
+    const closeIndex = text.indexOf(delimiter, delimiter.length);
+    if (closeIndex <= delimiter.length) return null;
 
     return {
-      content: text.slice(1, closeIndex),
-      startOffset: 1,
-      fullLength: closeIndex + 1,
+      content: text.slice(delimiter.length, closeIndex),
+      startOffset: delimiter.length,
+      fullLength: closeIndex + delimiter.length,
+      delimiter,
       isCode: true,
     };
   }
@@ -1126,34 +1331,6 @@ class ReadingHighlighterPlugin extends Plugin {
 
   isWordLike(char) {
     return !!char && /[\p{L}\p{N}]/u.test(char);
-  }
-
-  /*────────── 최적 매칭 탐색 ──────────*/
-  findBestMatch(text, snippet) {
-    const normalizedSnippet = snippet.trim();
-
-    // 정확한 매칭 시도
-    const exactMatch = this.uniqueDirectMatch(text, normalizedSnippet);
-    if (exactMatch[0] != null) return exactMatch;
-
-    // 공백 정규화 후 매칭 시도
-    const normalizedText = text.replace(/\s+/g, ' ');
-    const normalizedSnippetSpaces = normalizedSnippet.replace(/\s+/g, ' ');
-
-    let pos = 0;
-    const matches = [];
-
-    while ((pos = normalizedText.indexOf(normalizedSnippetSpaces, pos)) !== -1) {
-      matches.push([pos, pos + normalizedSnippetSpaces.length]);
-      pos++;
-    }
-
-    if (matches.length === 1) {
-      // 원본 텍스트의 실제 위치로 다시 맵핑
-      return this.mapNormalizedToOriginal(text, normalizedText, matches[0]);
-    }
-
-    return [null, null];
   }
 
   /*────────── 정규화된 텍스트 위치를 원본 텍스트 위치로 변환 ──────────*/
@@ -1227,7 +1404,7 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
   /*────────── 유연한 매칭 (첫 단어~마지막 단어 사이 정규식) ──────────*/
-  findFlexibleMatch(source, snippet) {
+  findFlexibleMatch(source, snippet, preferredSourcePos = null) {
     const words = snippet.trim().split(/\s+/);
     if (words.length < 2) return [null, null];
 
@@ -1247,6 +1424,19 @@ class ReadingHighlighterPlugin extends Plugin {
         const match = validMatches[0];
         return [match.index, match.index + match[0].length];
       }
+
+      if (validMatches.length > 1 && Number.isInteger(preferredSourcePos)) {
+        const sortedMatches = validMatches
+          .map((match) => [match.index, match.index + match[0].length])
+          .sort((a, b) => {
+            const distanceDiff =
+              this.rangeDistanceFromHint(a, preferredSourcePos) -
+              this.rangeDistanceFromHint(b, preferredSourcePos);
+            if (distanceDiff !== 0) return distanceDiff;
+            return (a[1] - a[0]) - (b[1] - b[0]);
+          });
+        return sortedMatches[0];
+      }
     } catch (e) {
       // 정규식 오류 무시 (특수문자 등으로 인한 오류 방지)
     }
@@ -1255,14 +1445,6 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
   /*────────── 유틸리티 함수 ──────────*/
-  uniqueDirectMatch(src, text) {
-    const idx = src.indexOf(text);
-    if (idx === -1) return [null, null];
-    // 같은 텍스트가 두 번 이상 나타나면 위치를 특정할 수 없으므로 null 반환
-    if (src.indexOf(text, idx + text.length) !== -1) return [null, null];
-    return [idx, idx + text.length];
-  }
-
   escapeForRegex(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
