@@ -525,7 +525,7 @@ class ReadingHighlighterPlugin extends Plugin {
 
     let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
     let depth = 0;
-    while (el && !el.getAttribute("data-sourcepos") && depth < 8) {
+    while (el && !el.getAttribute("data-sourcepos") && depth < 24) {
       el = el.parentElement;
       depth++;
     }
@@ -567,6 +567,11 @@ class ReadingHighlighterPlugin extends Plugin {
   /*────────── 선택 범위 결정/검증 ──────────*/
   resolveSelectionRange(raw, snippet, anchorNode, focusNode, roughStartHint = null, roughEndHint = null) {
     const candidateBounds = [];
+    const scopedRanges = this.getScopedSelectionRanges(raw, anchorNode, focusNode);
+
+    for (const scopedRange of scopedRanges) {
+      candidateBounds.push(scopedRange);
+    }
 
     const nodeBounds = this.getRoughBoundsFromNodes(anchorNode, focusNode);
     if (nodeBounds.roughStart != null && nodeBounds.roughEnd != null) {
@@ -619,6 +624,23 @@ class ReadingHighlighterPlugin extends Plugin {
     const fallback = this.findMatchWithLinks(raw, snippet, fallbackHint);
     if (fallback[0] == null || fallback[1] == null) return null;
     return fallback;
+  }
+
+  getScopedSelectionRanges(raw, anchorNode, focusNode) {
+    const ranges = [];
+    const seen = new Set();
+
+    for (const node of [anchorNode, focusNode]) {
+      const range = this.sourceRangeViaSourcePos(node, raw);
+      if (!range) continue;
+
+      const key = `${range[0]}:${range[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      ranges.push(range);
+    }
+
+    return ranges;
   }
 
   refineRangeWithinBounds(raw, snippet, start, end, preferredSourcePos = null) {
@@ -879,9 +901,9 @@ class ReadingHighlighterPlugin extends Plugin {
   posViaSourcePos(node) {
     if (!node) return null;
     let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
-    // 최대 5단계까지 부모 탐색 (무한 루프 방지)
+    // 여러 래퍼를 거친 텍스트 노드에서도 sourcepos를 찾을 수 있도록 충분히 위까지 탐색
     let count = 0;
-    while (el && !el.getAttribute("data-sourcepos") && count < 5) {
+    while (el && !el.getAttribute("data-sourcepos") && count < 24) {
         el = el.parentElement;
         count++;
     }

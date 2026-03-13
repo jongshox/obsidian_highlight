@@ -14,6 +14,31 @@ function lineStart(source, lineText) {
   return start;
 }
 
+function buildDeepTextNode(sourcePos, depth = 10) {
+  let current = {
+    nodeType: 1,
+    parentElement: null,
+    getAttribute(name) {
+      return name === "data-sourcepos" ? sourcePos : null;
+    },
+  };
+
+  for (let i = 0; i < depth; i++) {
+    current = {
+      nodeType: 1,
+      parentElement: current,
+      getAttribute() {
+        return null;
+      },
+    };
+  }
+
+  return {
+    nodeType: 3,
+    parentElement: current,
+  };
+}
+
 test("keeps inline markdown valid for synthetic selections", () => {
   const plugin = createPlugin();
 
@@ -78,6 +103,26 @@ test("handles real mixed anchor and markdown-link selections from C drive vault"
     highlightSnippet(plugin, source, "Figures 11-2부터 11-8까지", roughStart, roughStart),
     source.replace(rawSegment, `==${rawSegment}==`)
   );
+});
+
+test("uses sourcepos-scoped block ranges when duplicate text appears in the file", () => {
+  const plugin = createPlugin();
+  const filePath =
+    "/mnt/c/obsidian/PSY Books/books/the-neuroscience-of-clinical-psychiatry/chapters_ko/ch339__23-anxiety.md";
+  const source = read(filePath);
+  const line60 = source.split("\n")[59];
+  const line60Start = lineStart(source, line60);
+  const snippet = "PTSD에 어느 정도 영향력이 있지만, 세부 사항은 여전히 불명확하다는 것이다";
+  const expectedStart = source.indexOf(snippet, line60Start);
+  const expectedEnd = expectedStart + snippet.length;
+  const sourcePos = `60:1-60:${line60.length}`;
+  const anchorNode = buildDeepTextNode(sourcePos, 10);
+  const focusNode = buildDeepTextNode(sourcePos, 12);
+  const range = plugin.resolveSelectionRange(source, snippet, anchorNode, focusNode, null, null);
+
+  assert.ok(range);
+  assert.equal(range[0], expectedStart);
+  assert.equal(range[1], expectedEnd);
 });
 
 test("handles real emphasis boundary crossings from C drive vault", () => {
