@@ -125,6 +125,24 @@ test("uses sourcepos-scoped block ranges when duplicate text appears in the file
   assert.equal(range[1], expectedEnd);
 });
 
+test("uses rendered selection context when sourcepos hints are unavailable", () => {
+  const plugin = createPlugin();
+  const filePath =
+    "/mnt/c/obsidian/PSY Books/books/the-neuroscience-of-clinical-psychiatry/chapters_ko/ch339__23-anxiety.md";
+  const source = read(filePath);
+  const line60 = source.split("\n")[59];
+  const line60Start = lineStart(source, line60);
+  const snippet = "PTSD에 어느 정도 영향력이 있지만, 세부 사항은 여전히 불명확하다는 것이다";
+  const expectedStart = source.indexOf(snippet, line60Start);
+  const expectedEnd = expectedStart + snippet.length;
+  const contextText = plugin.createPositionMap(line60).renderedText;
+  const range = plugin.resolveSelectionRange(source, snippet, null, null, null, null, [], [contextText]);
+
+  assert.ok(range);
+  assert.equal(range[0], expectedStart);
+  assert.equal(range[1], expectedEnd);
+});
+
 test("handles real emphasis boundary crossings from C drive vault", () => {
   const plugin = createPlugin();
   const filePath =

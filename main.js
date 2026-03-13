@@ -166,6 +166,17 @@ class ReadingHighlighterPlugin extends Plugin {
     if (!this.normalizeSpaces(snippet)) return;
 
     const roughBounds = this.getRoughBoundsFromNodes(sel?.anchorNode ?? null, sel?.focusNode ?? null);
+    const contextTexts = this.getSelectionContextTexts(
+      sel?.anchorNode ?? null,
+      sel?.focusNode ?? null,
+      view,
+      snippet
+    );
+    const sourcePosHints = this.getSelectionSourcePosHints(
+      sel?.anchorNode ?? null,
+      sel?.focusNode ?? null,
+      view
+    );
 
     this.lastSelectionSnapshot = {
       snippet,
@@ -173,6 +184,8 @@ class ReadingHighlighterPlugin extends Plugin {
       focusNode: sel?.focusNode ?? null,
       roughStart: roughBounds.roughStart,
       roughEnd: roughBounds.roughEnd,
+      contextTexts,
+      sourcePosHints,
       capturedAt: Date.now(),
     };
   }
@@ -199,6 +212,17 @@ class ReadingHighlighterPlugin extends Plugin {
         focusNode: sel?.focusNode ?? null,
         roughStart: roughBounds.roughStart,
         roughEnd: roughBounds.roughEnd,
+        contextTexts: this.getSelectionContextTexts(
+          sel?.anchorNode ?? null,
+          sel?.focusNode ?? null,
+          view,
+          sel?.toString() ?? ""
+        ),
+        sourcePosHints: this.getSelectionSourcePosHints(
+          sel?.anchorNode ?? null,
+          sel?.focusNode ?? null,
+          view
+        ),
       };
     }
 
@@ -224,7 +248,105 @@ class ReadingHighlighterPlugin extends Plugin {
       focusNode: hasLiveSnapshotNodes ? snapshot.focusNode : null,
       roughStart: Number.isInteger(snapshot.roughStart) ? snapshot.roughStart : null,
       roughEnd: Number.isInteger(snapshot.roughEnd) ? snapshot.roughEnd : null,
+      contextTexts: Array.isArray(snapshot.contextTexts) ? snapshot.contextTexts : [],
+      sourcePosHints: Array.isArray(snapshot.sourcePosHints) ? snapshot.sourcePosHints : [],
     };
+  }
+
+  getSelectionContextTexts(anchorNode, focusNode, view, snippet = "") {
+    const contexts = [];
+    const seen = new Set();
+    const normalizedSnippet = this.normalizeSpaces(snippet);
+
+    for (const node of [anchorNode, focusNode]) {
+      for (const text of this.collectContextTextsFromNode(node, view, normalizedSnippet)) {
+        if (!text || seen.has(text)) continue;
+        seen.add(text);
+        contexts.push(text);
+      }
+    }
+
+    contexts.sort((a, b) => b.length - a.length);
+    return contexts.slice(0, 6);
+  }
+
+  collectContextTextsFromNode(node, view, normalizedSnippet = "") {
+    const contexts = [];
+    const seen = new Set();
+    let el = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+
+    while (el && view?.containerEl && !view.containerEl.contains(el)) {
+      el = el.parentElement;
+    }
+    if (!el) return contexts;
+
+    let depth = 0;
+    while (el && view?.containerEl?.contains(el) && depth < 12) {
+      const normalizedText = this.normalizeSpaces(el.textContent ?? "");
+      const isUsefulContext =
+        normalizedText &&
+        normalizedText !== normalizedSnippet &&
+        normalizedText.length > normalizedSnippet.length;
+
+      if (isUsefulContext && !seen.has(normalizedText)) {
+        seen.add(normalizedText);
+        contexts.push(normalizedText);
+      }
+
+      if (el.matches?.("p, li, blockquote, h1, h2, h3, h4, h5, h6, td, th")) {
+        const blockText = this.normalizeSpaces(el.textContent ?? "");
+        if (
+          blockText &&
+          blockText !== normalizedSnippet &&
+          blockText.length > normalizedSnippet.length &&
+          !seen.has(blockText)
+        ) {
+          seen.add(blockText);
+          contexts.push(blockText);
+        }
+      }
+
+      el = el.parentElement;
+      depth++;
+    }
+
+    return contexts;
+  }
+
+  getSelectionSourcePosHints(anchorNode, focusNode, view) {
+    const hints = [];
+    const seen = new Set();
+
+    for (const node of [anchorNode, focusNode]) {
+      for (const hint of this.collectSourcePosHintsFromNode(node, view)) {
+        if (!hint || seen.has(hint)) continue;
+        seen.add(hint);
+        hints.push(hint);
+      }
+    }
+
+    return hints;
+  }
+
+  collectSourcePosHintsFromNode(node, view) {
+    const hints = [];
+    if (!node) return hints;
+
+    let el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    while (el && view?.containerEl && !view.containerEl.contains(el)) {
+      el = el.parentElement;
+    }
+    if (!el) return hints;
+
+    let depth = 0;
+    while (el && view?.containerEl?.contains(el) && depth < 12) {
+      const attr = el.getAttribute?.("data-sourcepos");
+      if (attr) hints.push(attr);
+      el = el.parentElement;
+      depth++;
+    }
+
+    return hints;
   }
 
   isSelectionInActiveView(sel, view) {
@@ -310,7 +432,9 @@ class ReadingHighlighterPlugin extends Plugin {
       selection.anchorNode,
       selection.focusNode,
       selection.roughStart,
-      selection.roughEnd
+      selection.roughEnd,
+      selection.sourcePosHints,
+      selection.contextTexts
     );
     if (!sourceRange) {
       new Notice("파일에서 선택 영역의 위치를 찾을 수 없습니다.");
@@ -533,7 +657,13 @@ class ReadingHighlighterPlugin extends Plugin {
     const attr = el?.getAttribute("data-sourcepos");
     if (!attr) return null;
 
-    const parsed = attr.match(/^(\d+):(\d+)-(\d+):(\d+)$/);
+    return this.sourceRangeFromAttr(attr, source);
+  }
+
+  sourceRangeFromAttr(attr, source) {
+    if (!attr) return null;
+
+    const parsed = String(attr).match(/^(\d+):(\d+)-(\d+):(\d+)$/);
     if (!parsed) return null;
 
     const startLine = Number(parsed[1]);
@@ -565,9 +695,18 @@ class ReadingHighlighterPlugin extends Plugin {
   }
 
   /*────────── 선택 범위 결정/검증 ──────────*/
-  resolveSelectionRange(raw, snippet, anchorNode, focusNode, roughStartHint = null, roughEndHint = null) {
+  resolveSelectionRange(
+    raw,
+    snippet,
+    anchorNode,
+    focusNode,
+    roughStartHint = null,
+    roughEndHint = null,
+    sourcePosHints = [],
+    selectionContextTexts = []
+  ) {
     const candidateBounds = [];
-    const scopedRanges = this.getScopedSelectionRanges(raw, anchorNode, focusNode);
+    const scopedRanges = this.getScopedSelectionRanges(raw, anchorNode, focusNode, sourcePosHints);
 
     for (const scopedRange of scopedRanges) {
       candidateBounds.push(scopedRange);
@@ -596,7 +735,8 @@ class ReadingHighlighterPlugin extends Plugin {
         snippet,
         roughStart,
         roughEnd,
-        roughStart
+        roughStart,
+        selectionContextTexts
       );
       if (refined) return refined;
 
@@ -608,7 +748,8 @@ class ReadingHighlighterPlugin extends Plugin {
         snippet,
         windowStart,
         windowEnd,
-        roughStart
+        roughStart,
+        selectionContextTexts
       );
       if (refinedAround) return refinedAround;
 
@@ -621,12 +762,17 @@ class ReadingHighlighterPlugin extends Plugin {
 
     const fallbackHint =
       Number.isInteger(roughStartHint) && roughStartHint >= 0 ? roughStartHint : null;
-    const fallback = this.findMatchWithLinks(raw, snippet, fallbackHint);
+    const fallback = this.findMatchWithLinks(
+      raw,
+      snippet,
+      fallbackHint,
+      selectionContextTexts
+    );
     if (fallback[0] == null || fallback[1] == null) return null;
     return fallback;
   }
 
-  getScopedSelectionRanges(raw, anchorNode, focusNode) {
+  getScopedSelectionRanges(raw, anchorNode, focusNode, sourcePosHints = []) {
     const ranges = [];
     const seen = new Set();
 
@@ -640,17 +786,39 @@ class ReadingHighlighterPlugin extends Plugin {
       ranges.push(range);
     }
 
+    for (const hint of sourcePosHints) {
+      const range = this.sourceRangeFromAttr(hint, raw);
+      if (!range) continue;
+
+      const key = `${range[0]}:${range[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      ranges.push(range);
+    }
+
     return ranges;
   }
 
-  refineRangeWithinBounds(raw, snippet, start, end, preferredSourcePos = null) {
+  refineRangeWithinBounds(
+    raw,
+    snippet,
+    start,
+    end,
+    preferredSourcePos = null,
+    selectionContextTexts = []
+  ) {
     if (start < 0 || end > raw.length || start >= end) return null;
 
     const fragment = raw.slice(start, end);
     const localPreferredPos = Number.isInteger(preferredSourcePos)
       ? Math.max(0, Math.min(fragment.length, preferredSourcePos - start))
       : null;
-    const localMatch = this.findMatchWithLinks(fragment, snippet, localPreferredPos);
+    const localMatch = this.findMatchWithLinks(
+      fragment,
+      snippet,
+      localPreferredPos,
+      selectionContextTexts
+    );
     if (localMatch[0] == null || localMatch[1] == null) return null;
 
     const candidateStart = start + localMatch[0];
@@ -939,7 +1107,7 @@ class ReadingHighlighterPlugin extends Plugin {
 
 
   /*────────── 링크 포함 텍스트 매칭 (폴백 탐색) ──────────*/
-  findMatchWithLinks(source, snippet, preferredSourcePos = null) {
+  findMatchWithLinks(source, snippet, preferredSourcePos = null, selectionContextTexts = []) {
     const candidates = [];
 
     for (const range of this.findDirectMatches(source, snippet)) {
@@ -956,7 +1124,12 @@ class ReadingHighlighterPlugin extends Plugin {
       candidates.push(mappedRange);
     }
 
-    const picked = this.pickBestCandidateRange(candidates, preferredSourcePos);
+    const picked = this.pickBestCandidateRange(
+      candidates,
+      preferredSourcePos,
+      source,
+      selectionContextTexts
+    );
     if (picked) return picked;
 
     return this.findFlexibleMatch(source, snippet, preferredSourcePos);
@@ -1007,7 +1180,12 @@ class ReadingHighlighterPlugin extends Plugin {
     return matches;
   }
 
-  pickBestCandidateRange(candidates, preferredSourcePos = null) {
+  pickBestCandidateRange(
+    candidates,
+    preferredSourcePos = null,
+    source = "",
+    selectionContextTexts = []
+  ) {
     if (!candidates.length) return null;
 
     const unique = [];
@@ -1022,27 +1200,86 @@ class ReadingHighlighterPlugin extends Plugin {
 
     if (unique.length === 0) return null;
     if (unique.length === 1) return unique[0];
-    if (!Number.isInteger(preferredSourcePos)) return null;
 
-    unique.sort((a, b) => {
-      const distanceDiff =
-        this.rangeDistanceFromHint(a, preferredSourcePos) -
-        this.rangeDistanceFromHint(b, preferredSourcePos);
-      if (distanceDiff !== 0) return distanceDiff;
+    if (Number.isInteger(preferredSourcePos)) {
+      unique.sort((a, b) => {
+        const distanceDiff =
+          this.rangeDistanceFromHint(a, preferredSourcePos) -
+          this.rangeDistanceFromHint(b, preferredSourcePos);
+        if (distanceDiff !== 0) return distanceDiff;
 
-      const spanDiff = (a[1] - a[0]) - (b[1] - b[0]);
-      if (spanDiff !== 0) return spanDiff;
+        const spanDiff = (a[1] - a[0]) - (b[1] - b[0]);
+        if (spanDiff !== 0) return spanDiff;
 
-      return a[0] - b[0];
-    });
+        return a[0] - b[0];
+      });
 
-    return unique[0];
+      return unique[0];
+    }
+
+    const normalizedContexts = (Array.isArray(selectionContextTexts)
+      ? selectionContextTexts
+      : [selectionContextTexts]
+    )
+      .map((text) => this.normalizeSpaces(text))
+      .filter(Boolean);
+
+    if (normalizedContexts.length > 0 && source) {
+      const scored = unique
+        .map((range) => ({
+          range,
+          score: this.scoreCandidateContexts(source, range, normalizedContexts),
+        }))
+        .sort((a, b) => b.score - a.score || a.range[0] - b.range[0]);
+
+      if (
+        scored[0]?.score > 0 &&
+        (scored.length === 1 || scored[0].score > scored[1].score)
+      ) {
+        return scored[0].range;
+      }
+    }
+
+    return null;
   }
 
   rangeDistanceFromHint([start, end], preferredSourcePos) {
     if (preferredSourcePos < start) return start - preferredSourcePos;
     if (preferredSourcePos > end) return preferredSourcePos - end;
     return 0;
+  }
+
+  scoreCandidateContexts(source, range, normalizedContexts) {
+    let best = 0;
+    for (const context of normalizedContexts) {
+      best = Math.max(best, this.scoreCandidateContext(source, range, context));
+    }
+    return best;
+  }
+
+  scoreCandidateContext(source, [start, end], normalizedContext) {
+    const candidateWindow = this.getCandidateContextWindow(source, start, end);
+    const candidateRendered = this.normalizeSpaces(this.createPositionMap(candidateWindow).renderedText);
+    if (!candidateRendered || !normalizedContext) return 0;
+    if (candidateRendered === normalizedContext) return 100000;
+
+    const candidateTokens = new Set(candidateRendered.split(" ").filter((token) => token.length >= 2));
+    let score = 0;
+    for (const token of normalizedContext.split(" ")) {
+      if (token.length < 2) continue;
+      if (candidateTokens.has(token)) score += Math.min(token.length, 12);
+    }
+
+    if (candidateRendered.includes(normalizedContext)) score += 5000;
+    if (normalizedContext.includes(candidateRendered)) score += 2000;
+    return score;
+  }
+
+  getCandidateContextWindow(source, start, end) {
+    const lineStart = source.lastIndexOf("\n", start - 1) + 1;
+    let lineEnd = source.indexOf("\n", end);
+    if (lineEnd === -1) lineEnd = source.length;
+    return source.slice(lineStart, lineEnd);
   }
 
   /*────────── 위치 맵 생성 (마크다운 → 렌더링 텍스트) ──────────*/
